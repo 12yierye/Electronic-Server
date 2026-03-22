@@ -1,0 +1,26 @@
+{
+  "name": "electronic-server",
+  "version": "1.0.0",
+  "description": "Electronic应用的服务端",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "stop": "node stop-server.js",
+    "stop:win": "taskkill /F /IM node.exe 2>nul || echo 服务未运行或已停止",
+    "stop:nix": "kill -9 $(lsof -t -i:3000) 2>/dev/null || echo 服务未运行或已停止",
+    "stop:port": "npx kill-port 3000 || echo 服务未运行或已停止",
+    "pm2:start": "pm2 start server.js --name electronic-server",
+    "pm2:stop": "pm2 stop electronic-server",
+    "pm2:restart": "pm2 restart electronic-server",
+    "pm2:status": "pm2 status",
+    "pm2:logs": "pm2 logs electronic-server",
+    "pm2:delete": "pm2 delete electronic-server"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22"
+  }
+}
