@@ -18,7 +18,9 @@
     "pm2:delete": "pm2 delete electronic-server"
   },
   "dependencies": {
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "axios": "^1.6.0"
   },
   "devDependencies": {
     "nodemon": "^2.0.22"

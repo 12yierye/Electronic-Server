@@ -135,10 +135,27 @@ initializeChatMessagesDir();
 
 // 初始化用户数据文件
 function initializeUsersFile() {
-  if (!fs.existsSync(usersFilePath)) {
-    // 初始化为空数组，不创建默认用户
-    const initialUsers = [];
-    fs.writeFileSync(usersFilePath, JSON.stringify(initialUsers, null, 2));
+  let users = []
+  if (fs.existsSync(usersFilePath)) {
+    try {
+      users = JSON.parse(fs.readFileSync(usersFilePath, 'utf8'))
+    } catch (e) {
+      users = []
+    }
+  }
+
+  // 确保 admin 用户存在
+  const hasAdmin = users.some(u => u.username === 'admin')
+  if (!hasAdmin) {
+    users.push({
+      username: 'admin',
+      password: 'admin',
+      nickname: '管理员',
+      avatar: '',
+      createdAt: Date.now()
+    })
+    fs.writeFileSync(usersFilePath, JSON.stringify(users, null, 2))
+    console.log('[初始化] 默认用户 admin 已创建')
   }
 }
 
@@ -529,9 +546,10 @@ app.get('/users/friends', (req, res) => {
     }
     
     // 获取好友详细信息
-    const friends = users.filter(u => user.friends.includes(u.username))
-      .map(user => {
-        const { password, ...userWithoutPassword } = user;
+    const userFriends = user.friends || []
+    const friends = users.filter(u => userFriends.includes(u.username))
+      .map(friend => {
+        const { password, ...userWithoutPassword } = friend;
         return userWithoutPassword;
       });
     
@@ -857,22 +875,698 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
+// ========== 内网聊天功能 ==========
+
+// 内网在线用户集合
+const lanOnlineUsers = new Set();
+
+// 内网消息存储目录
+const lanChatMessagesDir = path.join(__dirname, 'lan_chat_messages');
+
+// 初始化内网聊天消息目录
+function initializeLanChatMessagesDir() {
+  if (!fs.existsSync(lanChatMessagesDir)) {
+    fs.mkdirSync(lanChatMessagesDir, { recursive: true });
+  }
+}
+
+// 获取内网聊天消息文件路径
+function getLanChatMessagesPath(user1, user2) {
+  const participants = [user1, user2].sort();
+  return path.join(lanChatMessagesDir, `${participants[0]}_${participants[1]}.json`);
+}
+
+// 读取内网聊天消息
+function readLanChatMessages(user1, user2) {
+  try {
+    const chatPath = getLanChatMessagesPath(user1, user2);
+    if (!fs.existsSync(chatPath)) {
+      return [];
+    }
+    const data = fs.readFileSync(chatPath, 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.error(`读取内网聊天消息错误:`, error.message);
+    return [];
+  }
+}
+
+// 保存内网聊天消息
+function writeLanChatMessages(user1, user2, messages) {
+  try {
+    const chatPath = getLanChatMessagesPath(user1, user2);
+    fs.writeFileSync(chatPath, JSON.stringify(messages, null, 2));
+  } catch (error) {
+    console.error(`保存内网聊天消息错误:`, error.message);
+  }
+}
+
+// 初始化内网聊天消息目录
+initializeLanChatMessagesDir();
+
+// 用户登录内网
+app.post('/api/login', (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const users = readUsersFromFile();
+    
+    if (!username || !password) {
+      return res.status(400).json({
+        success: false,
+        message: '用户名或密码不能为空'
+      });
+    }
+    
+    const user = users.find(u => u.username === username && u.password === password);
+    
+    if (user) {
+      lanOnlineUsers.add(username);
+      console.log(`[内网] 用户 ${username} 登录上线，当前在线: ${Array.from(lanOnlineUsers).join(', ')}`);
+      
+      const { password, ...userWithoutPassword } = user;
+      return res.json({
+        success: true,
+        message: '登录成功',
+        user: userWithoutPassword
+      });
+    } else {
+      return res.status(401).json({
+        success: false,
+        message: '用户名或密码错误'
+      });
+    }
+  } catch (error) {
+    console.error('[内网] 登录错误:', error);
+    return res.status(500).json({
+      success: false,
+      message: '服务器内部错误'
+    });
+  }
+});
+
+// 用户退出内网
+app.post('/api/logout', (req, res) => {
+  try {
+    const { username } = req.body;
+    
+    if (!username) {
+      return res.status(400).json({
+        success: false,
+        message: '用户名不能为空'
+      });
+    }
+    
+    lanOnlineUsers.delete(username);
+    console.log(`[内网] 用户 ${username} 下线，当前在线: ${Array.from(lanOnlineUsers).join(', ')}`);
+    
+    return res.json({
+      success: true,
+      message: '退出成功'
+    });
+  } catch (error) {
+    console.error('[内网] 退出错误:', error);
+    return res.status(500).json({
+      success: false,
+      message: '服务器内部错误'
+    });
+  }
+});
+
+// 获取内网用户列表（所有注册用户，无需好友）
+app.get('/api/friends', (req, res) => {
+  try {
+    // 返回所有注册用户作为内网用户（无需好友验证）
+    const users = readUsersFromFile();
+    
+    // 标记在线状态，排除自己
+    const currentUser = req.query.username || '';
+    const userList = users
+      .filter(user => user.username !== currentUser)
+      .map(user => {
+        const { password, ...userWithoutPassword } = user;
+        return {
+          ...userWithoutPassword,
+          online: lanOnlineUsers.has(user.username)
+        };
+      });
+    
+    return res.json({
+      success: true,
+      friends: userList
+    });
+  } catch (error) {
+    console.error('[内网] 获取用户列表错误:', error);
+    return res.status(500).json({
+      success: false,
+      message: '服务器内部错误'
+    });
+  }
+});
+
+// 获取内网聊天消息
+app.get('/api/messages', (req, res) => {
+  try {
+    const { from, to } = req.query;
+    
+    if (!from || !to) {
+      return res.status(400).json({
+        success: false,
+        message: '发送者和接收者不能为空'
+      });
+    }
+    
+    const messages = readLanChatMessages(from, to);
+    
+    return res.json({
+      success: true,
+      messages: messages
+    });
+  } catch (error) {
+    console.error('[内网] 获取消息错误:', error);
+    return res.status(500).json({
+      success: false,
+      message: '服务器内部错误'
+    });
+  }
+});
+
+// 发送内网消息
+app.post('/api/messages', (req, res) => {
+  try {
+    const { from, to, message, type } = req.body;
+    
+    if (!from || !to || !message) {
+      return res.status(400).json({
+        success: false,
+        message: '发送者、接收者和消息内容不能为空'
+      });
+    }
+    
+    // 创建消息对象
+    const chatMessage = {
+      id: Date.now(),
+      from: from,
+      to: to,
+      message: message,
+      type: type || 'text',
+      timestamp: new Date().toISOString()
+    };
+    
+    // 读取现有消息
+    const messages = readLanChatMessages(from, to);
+    
+    // 添加新消息
+    messages.push(chatMessage);
+    
+    // 保存消息
+    writeLanChatMessages(from, to, messages);
+    
+    console.log(`[内网消息] ${from} -> ${to}: ${message.substring(0, 50)}${message.length > 50 ? '...' : ''}`);
+    
+    return res.json({
+      success: true,
+      message: '消息发送成功',
+      data: chatMessage
+    });
+  } catch (error) {
+    console.error('[内网] 发送消息错误:', error);
+    return res.status(500).json({
+      success: false,
+      message: '服务器内部错误'
+    });
+  }
+});
+
+// 获取内网在线状态
+app.get('/api/online', (req, res) => {
+  try {
+    return res.json({
+      success: true,
+      onlineUsers: Array.from(lanOnlineUsers)
+    });
+  } catch (error) {
+    console.error('[内网] 获取在线用户错误:', error);
+    return res.status(500).json({
+      success: false,
+      message: '服务器内部错误'
+    });
+  }
+});
+
+// ========== 内网群聊功能 ==========
+
+// 内网群聊存储目录
+const lanGroupsDir = path.join(__dirname, 'lan_groups');
+
+// 内网群聊消息目录
+const lanGroupMessagesDir = path.join(__dirname, 'lan_group_messages');
+
+// 初始化群聊目录
+function initializeLanGroupsDir() {
+  if (!fs.existsSync(lanGroupsDir)) {
+    fs.mkdirSync(lanGroupsDir, { recursive: true });
+  }
+  if (!fs.existsSync(lanGroupMessagesDir)) {
+    fs.mkdirSync(lanGroupMessagesDir, { recursive: true });
+  }
+}
+
+// 读取群聊列表
+function readGroups() {
+  try {
+    const groupsPath = path.join(lanGroupsDir, 'groups.json');
+    if (!fs.existsSync(groupsPath)) {
+      return [];
+    }
+    const data = fs.readFileSync(groupsPath, 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.error('读取群聊列表错误:', error.message);
+    return [];
+  }
+}
+
+// 保存群聊列表
+function writeGroups(groups) {
+  try {
+    const groupsPath = path.join(lanGroupsDir, 'groups.json');
+    fs.writeFileSync(groupsPath, JSON.stringify(groups, null, 2));
+  } catch (error) {
+    console.error('保存群聊列表错误:', error.message);
+  }
+}
+
+// 获取群聊消息文件路径
+function getGroupMessagesPath(groupId) {
+  return path.join(lanGroupMessagesDir, `${groupId}.json`);
+}
+
+// 读取群聊消息
+function readGroupMessages(groupId) {
+  try {
+    const msgPath = getGroupMessagesPath(groupId);
+    if (!fs.existsSync(msgPath)) {
+      return [];
+    }
+    const data = fs.readFileSync(msgPath, 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.error('读取群聊消息错误:', error.message);
+    return [];
+  }
+}
+
+// 保存群聊消息
+function writeGroupMessages(groupId, messages) {
+  try {
+    const msgPath = getGroupMessagesPath(groupId);
+    fs.writeFileSync(msgPath, JSON.stringify(messages, null, 2));
+  } catch (error) {
+    console.error('保存群聊消息错误:', error.message);
+  }
+}
+
+// 初始化群聊目录
+initializeLanGroupsDir();
+
+// 创建群聊
+app.post('/api/groups', (req, res) => {
+  try {
+    const { name, creator, members } = req.body;
+    
+    if (!name || !creator) {
+      return res.status(400).json({
+        success: false,
+        message: '群名称和创建者不能为空'
+      });
+    }
+    
+    const groups = readGroups();
+    
+    // 生成群ID
+    const groupId = `group_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    // 群成员默认包含创建者
+    const groupMembers = Array.isArray(members) 
+      ? [...new Set([creator, ...members])] 
+      : [creator];
+    
+    const newGroup = {
+      id: groupId,
+      name: name,
+      creator: creator,
+      members: groupMembers,
+      createdAt: new Date().toISOString()
+    };
+    
+    groups.push(newGroup);
+    writeGroups(groups);
+    
+    console.log(`[内网群聊] 用户 ${creator} 创建了群聊 "${name}"，群ID: ${groupId}，成员: ${groupMembers.join(', ')}`);
+    
+    return res.json({
+      success: true,
+      message: '群聊创建成功',
+      group: newGroup
+    });
+  } catch (error) {
+    console.error('[内网] 创建群聊错误:', error);
+    return res.status(500).json({
+      success: false,
+      message: '服务器内部错误'
+    });
+  }
+});
+
+// 获取群聊列表（用户加入的群）
+app.get('/api/groups', (req, res) => {
+  try {
+    const { username } = req.query;
+    
+    if (!username) {
+      return res.status(400).json({
+        success: false,
+        message: '用户名不能为空'
+      });
+    }
+    
+    const groups = readGroups();
+    
+    // 筛选用户所在的群
+    const userGroups = groups.filter(group => 
+      group.members.includes(username)
+    );
+    
+    return res.json({
+      success: true,
+      groups: userGroups
+    });
+  } catch (error) {
+    console.error('[内网] 获取群聊列表错误:', error);
+    return res.status(500).json({
+      success: false,
+      message: '服务器内部错误'
+    });
+  }
+});
+
+// 获取群聊消息
+app.get('/api/group-messages', (req, res) => {
+  try {
+    const { groupId } = req.query;
+    
+    if (!groupId) {
+      return res.status(400).json({
+        success: false,
+        message: '群ID不能为空'
+      });
+    }
+    
+    const messages = readGroupMessages(groupId);
+    
+    return res.json({
+      success: true,
+      messages: messages
+    });
+  } catch (error) {
+    console.error('[内网] 获取群消息错误:', error);
+    return res.status(500).json({
+      success: false,
+      message: '服务器内部错误'
+    });
+  }
+});
+
+// 发送群聊消息
+app.post('/api/group-messages', (req, res) => {
+  try {
+    const { groupId, from, message, type } = req.body;
+    
+    if (!groupId || !from || !message) {
+      return res.status(400).json({
+        success: false,
+        message: '群ID、发送者和消息内容不能为空'
+      });
+    }
+    
+    // 验证群是否存在
+    const groups = readGroups();
+    const group = groups.find(g => g.id === groupId);
+    
+    if (!group) {
+      return res.status(404).json({
+        success: false,
+        message: '群聊不存在'
+      });
+    }
+    
+    // 验证发送者是否是群成员
+    if (!group.members.includes(from)) {
+      return res.status(403).json({
+        success: false,
+        message: '您不是该群成员'
+      });
+    }
+    
+    // 创建消息对象
+    const chatMessage = {
+      id: Date.now(),
+      groupId: groupId,
+      from: from,
+      message: message,
+      type: type || 'text',
+      timestamp: new Date().toISOString()
+    };
+    
+    // 读取现有消息并添加
+    const messages = readGroupMessages(groupId);
+    messages.push(chatMessage);
+    writeGroupMessages(groupId, messages);
+    
+    console.log(`[内网群消息] 群 "${group.name}" (${groupId}): ${from}: ${message.substring(0, 50)}${message.length > 50 ? '...' : ''}`);
+    
+    return res.json({
+      success: true,
+      message: '消息发送成功',
+      data: chatMessage
+    });
+  } catch (error) {
+    console.error('[内网] 发送群消息错误:', error);
+    return res.status(500).json({
+      success: false,
+      message: '服务器内部错误'
+    });
+  }
+});
+
+// 加入群聊
+app.post('/api/groups/join', (req, res) => {
+  try {
+    const { groupId, username } = req.body;
+    
+    if (!groupId || !username) {
+      return res.status(400).json({
+        success: false,
+        message: '群ID和用户名不能为空'
+      });
+    }
+    
+    const groups = readGroups();
+    const groupIndex = groups.findIndex(g => g.id === groupId);
+    
+    if (groupIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        message: '群聊不存在'
+      });
+    }
+    
+    if (groups[groupIndex].members.includes(username)) {
+      return res.status(400).json({
+        success: false,
+        message: '您已经是群成员'
+      });
+    }
+    
+    groups[groupIndex].members.push(username);
+    writeGroups(groups);
+    
+    console.log(`[内网群聊] 用户 ${username} 加入了群聊 "${groups[groupIndex].name}"`);
+    
+    return res.json({
+      success: true,
+      message: '加入群聊成功',
+      group: groups[groupIndex]
+    });
+  } catch (error) {
+    console.error('[内网] 加入群聊错误:', error);
+    return res.status(500).json({
+      success: false,
+      message: '服务器内部错误'
+    });
+  }
+});
+
+// 退出群聊
+app.post('/api/groups/leave', (req, res) => {
+  try {
+    const { groupId, username } = req.body;
+    
+    if (!groupId || !username) {
+      return res.status(400).json({
+        success: false,
+        message: '群ID和用户名不能为空'
+      });
+    }
+    
+    const groups = readGroups();
+    const groupIndex = groups.findIndex(g => g.id === groupId);
+    
+    if (groupIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        message: '群聊不存在'
+      });
+    }
+    
+    // 群主不能退群，只能解散
+    if (groups[groupIndex].creator === username) {
+      return res.status(400).json({
+        success: false,
+        message: '群主不能退群，请选择解散群聊'
+      });
+    }
+    
+    groups[groupIndex].members = groups[groupIndex].members.filter(m => m !== username);
+    writeGroups(groups);
+    
+    console.log(`[内网群聊] 用户 ${username} 退出了群聊 "${groups[groupIndex].name}"`);
+    
+    return res.json({
+      success: true,
+      message: '退出群聊成功'
+    });
+  } catch (error) {
+    console.error('[内网] 退出群聊错误:', error);
+    return res.status(500).json({
+      success: false,
+      message: '服务器内部错误'
+    });
+  }
+});
+
+// 解散群聊
+app.delete('/api/groups/:groupId', (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { username } = req.body;
+    
+    if (!username) {
+      return res.status(400).json({
+        success: false,
+        message: '用户名不能为空'
+      });
+    }
+    
+    const groups = readGroups();
+    const groupIndex = groups.findIndex(g => g.id === groupId);
+    
+    if (groupIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        message: '群聊不存在'
+      });
+    }
+    
+    if (groups[groupIndex].creator !== username) {
+      return res.status(403).json({
+        success: false,
+        message: '只有群主才能解散群聊'
+      });
+    }
+    
+    // 删除群聊
+    const deletedGroupName = groups[groupIndex].name;
+    groups.splice(groupIndex, 1);
+    writeGroups(groups);
+    
+    // 删除群聊消息
+    const msgPath = getGroupMessagesPath(groupId);
+    if (fs.existsSync(msgPath)) {
+      fs.unlinkSync(msgPath);
+    }
+    
+    console.log(`[内网群聊] 群聊 "${deletedGroupName}" (${groupId}) 已被群主 ${username} 解散`);
+    
+    return res.json({
+      success: true,
+      message: '群聊已解散'
+    });
+  } catch (error) {
+    console.error('[内网] 解散群聊错误:', error);
+    return res.status(500).json({
+      success: false,
+      message: '服务器内部错误'
+    });
+  }
+});
+
+// 健康检查接口（用于内网连接测试）
+app.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    message: '内网聊天服务正常运行',
+    version: '1.0.0',
+    lanUsers: Array.from(lanOnlineUsers).length,
+    lanGroups: readGroups().length
+  });
+});
+
+// ========== 启动服务器 ==========
+
 // 启动服务器，监听在0.0.0.0地址上以支持外部访问
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`服务器正在监听端口 ${PORT}`);
+  console.log('');
+  console.log('========================================');
+  console.log('       电子聊天系统服务端已启动');
+  console.log('========================================');
+  console.log('');
+  console.log(`服务器端口: ${PORT}`);
   console.log(`服务器地址: http://0.0.0.0:${PORT}`);
-  console.log(`本地访问地址: http://localhost:${PORT}`);
-  console.log(`登录接口地址: http://localhost:${PORT}/login`);
-  console.log(`注册接口地址: http://localhost:${PORT}/register`);
-  console.log(`用户列表接口地址: http://localhost:${PORT}/users`);
-  console.log(`用户文件列表接口地址: http://localhost:${PORT}/user/files`);
-  console.log(`文件上传接口地址: http://localhost:${PORT}/user/upload`);
-  console.log(`文件下载接口地址: http://localhost:${PORT}/user/download/:username/:filename`);
-  console.log(`文件删除接口地址: http://localhost:${PORT}/user/file/:username/:filename`);
-  
-  // 聊天消息接口地址
-  console.log(`发送消息接口地址: http://localhost:${PORT}/chat/send`);
-  console.log(`获取消息接口地址: http://localhost:${PORT}/chat/messages`);
+  console.log(`本地访问:   http://localhost:${PORT}`);
+  console.log('');
+  console.log('--- 公网功能接口 ---');
+  console.log(`注册:      POST http://localhost:${PORT}/register`);
+  console.log(`登录:      POST http://localhost:${PORT}/login`);
+  console.log(`用户列表:  GET  http://localhost:${PORT}/users`);
+  console.log(`发送消息:  POST http://localhost:${PORT}/chat/send`);
+  console.log(`获取消息:  GET  http://localhost:${PORT}/chat/messages`);
+  console.log(`文件上传:  POST http://localhost:${PORT}/user/upload`);
+  console.log(`文件下载:  GET  http://localhost:${PORT}/user/download/:username/:filename`);
+  console.log('');
+  console.log('--- 内网聊天功能接口 ---');
+  console.log(`内网登录:     POST http://localhost:${PORT}/api/login`);
+  console.log(`内网登出:     POST http://localhost:${PORT}/api/logout`);
+  console.log(`内网用户:     GET  http://localhost:${PORT}/api/friends`);
+  console.log(`内网消息:     GET  http://localhost:${PORT}/api/messages`);
+  console.log(`发送内网消息: POST http://localhost:${PORT}/api/messages`);
+  console.log(`在线状态:     GET  http://localhost:${PORT}/api/online`);
+  console.log(`创建群聊:     POST http://localhost:${PORT}/api/groups`);
+  console.log(`群聊列表:     GET  http://localhost:${PORT}/api/groups`);
+  console.log(`群聊消息:     GET  http://localhost:${PORT}/api/group-messages`);
+  console.log(`发送群消息:   POST http://localhost:${PORT}/api/group-messages`);
+  console.log(`加入群聊:     POST http://localhost:${PORT}/api/groups/join`);
+  console.log(`退出群聊:     POST http://localhost:${PORT}/api/groups/leave`);
+  console.log(`解散群聊:     DEL http://localhost:${PORT}/api/groups/:groupId`);
+  console.log('');
+  console.log('--- 使用说明 ---');
+  console.log('1. 公网模式：需加好友后才能聊天，消息存储在 chat_messages 目录');
+  console.log('2. 内网模式：所有用户可自由聊天，可创建群聊，消息存储在 lan_chat_messages 目录');
+  console.log('3. 客户端需在设置中启用"内网聊天"并配置内网服务器IP');
+  console.log('4. 内网模式下，用户列表自动显示所有注册用户（无需添加好友）');
+  console.log('');
+  console.log('========================================');
+  console.log('');
 });
 
 // 发送消息接口
